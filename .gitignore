@@ -1,0 +1,22 @@
+# data & model (disimpan di Google Drive, bukan di git)
+dataset_raw/
+dataset_synth/
+dataset/
+test_imgs/
+foto_asli/
+*.zip
+*.pt
+runs/
+hasil/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
