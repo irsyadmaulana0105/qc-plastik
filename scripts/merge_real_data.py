@@ -74,7 +74,11 @@ def main() -> None:
     entries = []                                 # (image path, label lines)
     n_pos = n_neg = n_skip = 0
     for folder in args.real:
-        for img in sorted(p for p in folder.rglob("*") if p.suffix.lower() in IMG_EXTS):
+        # skip helper sub-folders (tighten_labels.py writes review/ crops; annotate.py uses *_dibuang)
+        for img in sorted(p for p in folder.rglob("*")
+                          if p.suffix.lower() in IMG_EXTS
+                          and not any(part == "review" or part.endswith("_dibuang")
+                                      for part in p.relative_to(folder).parts[:-1])):
             lbl = img.with_suffix(".txt")
             lbl = lbl if lbl.exists() else labels.get(img.stem)
             if lbl is None:

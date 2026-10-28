@@ -8,6 +8,7 @@ Keys:
     s      - save current frame to dataset_raw/
     a      - toggle auto-capture (every --interval seconds)
     0/1/2/3- preview: 0 = color, 1 = red, 2 = green, 3 = blue channel
+    [ / ]  - manual focus down / up (turns autofocus off; watch the Sharpness value, keep the peak)
     q      - quit
 
 Examples:
@@ -41,7 +42,21 @@ WINDOW_NAME = "Dataset Capture  [s] save  [a] auto  [0-3] view  [q] quit"
 VIEW_NAMES = {0: "COLOR", 1: "RED", 2: "GREEN", 3: "BLUE"}
 
 
-def open_camera(index: int, exposure: float | None) -> cv2.VideoCapture:
+def parse_source(value: str):
+    """'0' -> camera index 0; 'http://IP:4747/video' -> network stream (DroidCam / IP camera)."""
+    return int(value) if value.isdigit() else value
+
+
+def open_camera(index, exposure: float | None, focus: float | None = None) -> cv2.VideoCapture:
+    if isinstance(index, str):                      # network stream URL
+        cap = cv2.VideoCapture(index, cv2.CAP_FFMPEG)
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open stream {index}")
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        print(f"Stream opened at {w}x{h}")
+        return cap
+
     if sys.platform.startswith("win"):
         backend = cv2.CAP_DSHOW
     elif sys.platform.startswith("linux"):
@@ -65,6 +80,11 @@ def open_camera(index: int, exposure: float | None) -> cv2.VideoCapture:
         cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
         cap.set(cv2.CAP_PROP_EXPOSURE, exposure)
         print(f"Manual exposure requested: {exposure} (read back: {cap.get(cv2.CAP_PROP_EXPOSURE)})")
+
+    if focus is not None:
+        cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)           # turn autofocus off
+        cap.set(cv2.CAP_PROP_FOCUS, focus)
+        print(f"Manual focus requested: {focus} (read back: {cap.get(cv2.CAP_PROP_FOCUS)})")
 
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -103,11 +123,15 @@ def put(img, text, y, color=(0, 255, 0)):
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--camera", type=int, default=0)
+    ap.add_argument("--camera", type=parse_source, default=0,
+                    help="camera index (0,1,2...) or stream URL, e.g. http://192.168.1.5:4747/video")
     ap.add_argument("--out", type=Path, default=Path("dataset_raw"))
     ap.add_argument("--interval", type=float, default=2.0, help="auto-capture period in seconds")
     ap.add_argument("--exposure", type=float, default=None,
                     help="manual exposure value (driver dependent); omit to keep auto exposure")
+    ap.add_argument("--focus", type=float, default=None,
+                    help="manual focus value (usually 0-255, driver dependent); turns autofocus off. "
+                         "Can also be adjusted live with [ and ] keys")
     ap.add_argument("--min-sharpness", type=float, default=0.0,
                     help="auto-capture skips frames below this sharpness (0 = disabled)")
     args = ap.parse_args()
@@ -131,7 +155,18 @@ def main() -> None:
         else:
             print(f"ERROR: failed to write {path}")
 
-    cap = open_camera(args.camera, args.exposure)
+    cap = open_camera(args.camera, args.exposure, args.focus)
+    focus_val = args.focus
+
+    def change_focus(delta: float) -> None:
+        nonlocal focus_val
+        if focus_val is None:                        # first press: switch to manual from current value
+            cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+            focus_val = cap.get(cv2.CAP_PROP_FOCUS) or 0.0
+        focus_val = max(0.0, min(255.0, focus_val + delta))
+        cap.set(cv2.CAP_PROP_FOCUS, focus_val)
+        print(f"Focus -> {focus_val:.0f} (read back: {cap.get(cv2.CAP_PROP_FOCUS)})")
+
     try:
         while True:
             ok, frame = cap.read()
@@ -159,6 +194,8 @@ def main() -> None:
             put(preview, f"Saved: {saved}   View: {VIEW_NAMES[view_mode]}", 35)
             put(preview, f"Mean R/G/B: {r:.0f} / {g:.0f} / {b:.0f}   Sharpness: {sharp:.0f}", 70,
                 (255, 255, 0))
+            if focus_val is not None:
+                put(preview, f"Manual focus: {focus_val:.0f}   ([ ] to change)", 140, (255, 200, 0))
             if auto:
                 put(preview, f"AUTO every {args.interval:g}s (skipped blurry: {skipped_blur})", 105,
                     (0, 200, 255))
@@ -177,6 +214,10 @@ def main() -> None:
                 print(f"Auto-capture {'ON' if auto else 'OFF'}")
             elif key in (ord("0"), ord("1"), ord("2"), ord("3")):
                 view_mode = int(chr(key))
+            elif key == ord("]"):
+                change_focus(+5)
+            elif key == ord("["):
+                change_focus(-5)
             elif key == ord("q"):
                 break
     finally:

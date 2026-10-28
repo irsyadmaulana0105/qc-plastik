@@ -4,6 +4,12 @@ dataset_synth/
 dataset/
 test_imgs/
 foto_asli/
+foto_asli_tight/
+foto_uji/
+foto_*_dibuang/
+tes_fokus/
+synth_paste/
+hasil_deteksi/
 *.zip
 *.pt
 runs/

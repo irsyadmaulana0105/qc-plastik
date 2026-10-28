@@ -5,12 +5,16 @@ Usage:
     python 4_realtime_inference.py
     python 4_realtime_inference.py --weights best.pt --conf 0.35 --imgsz 640 --camera 0
 
+    python 4_realtime_inference.py --weights best.pt --imgsz 1280 --conf 0.25 --camera 0 --focus 120
+
 Keys:
+    s - save the current raw frame to hasil_deteksi/ (use it for specks the model missed)
     q - quit
 """
 
 import argparse
 import sys
+from pathlib import Path
 import threading
 import time
 
@@ -24,27 +28,37 @@ FRAME_HEIGHT = 1080
 PREVIEW_WIDTH = 1280
 WINDOW_NAME = "QC - black_speck detection  [q] quit"
 BOX_COLOR = (0, 0, 255)  # BGR
+SAVE_DIR = Path("hasil_deteksi")  # [s] key saves raw frames here
 
 
 class LatestFrameReader:
     """Grabs frames in a background thread so inference always sees the newest frame
     (avoids the stale-buffer lag that appears when inference is slower than the camera)."""
 
-    def __init__(self, index: int):
-        if sys.platform.startswith("win"):
-            backend = cv2.CAP_DSHOW
-        elif sys.platform.startswith("linux"):
-            backend = cv2.CAP_V4L2
+    def __init__(self, index, focus=None):
+        if isinstance(index, str):                  # network stream URL (DroidCam / IP camera)
+            self.cap = cv2.VideoCapture(index, cv2.CAP_FFMPEG)
+            if not self.cap.isOpened():
+                raise RuntimeError(f"Cannot open stream {index}")
         else:
-            backend = cv2.CAP_ANY
+            if sys.platform.startswith("win"):
+                backend = cv2.CAP_DSHOW
+            elif sys.platform.startswith("linux"):
+                backend = cv2.CAP_V4L2
+            else:
+                backend = cv2.CAP_ANY
 
-        self.cap = cv2.VideoCapture(index, backend)
-        if not self.cap.isOpened():
-            raise RuntimeError(f"Cannot open camera index {index}")
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            self.cap = cv2.VideoCapture(index, backend)
+            if not self.cap.isOpened():
+                raise RuntimeError(f"Cannot open camera index {index}")
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            if focus is not None:                   # lock focus (autofocus hunts on plain plastic)
+                self.cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+                self.cap.set(cv2.CAP_PROP_FOCUS, focus)
+                print(f"Manual focus requested: {focus} (read back: {self.cap.get(cv2.CAP_PROP_FOCUS)})")
 
         w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -102,10 +116,13 @@ def draw_detections(frame, result, names) -> int:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--weights", default="best.pt")
-    ap.add_argument("--camera", type=int, default=0)
+    ap.add_argument("--camera", type=lambda v: int(v) if v.isdigit() else v, default=0,
+                    help="camera index (0,1,2...) or stream URL, e.g. http://192.168.1.5:4747/video")
     ap.add_argument("--conf", type=float, default=0.35)
     ap.add_argument("--iou", type=float, default=0.5)
-    ap.add_argument("--imgsz", type=int, default=640)
+    ap.add_argument("--imgsz", type=int, default=640, help="must match the size used for training (1280 for v2/v3)")
+    ap.add_argument("--focus", type=float, default=None,
+                    help="manual focus value found with 1_capture_dataset.py (turns autofocus off)")
     args = ap.parse_args()
 
     use_cuda = torch.cuda.is_available()
@@ -119,7 +136,7 @@ def main() -> None:
     dummy = np.zeros((FRAME_HEIGHT, FRAME_WIDTH, 3), dtype=np.uint8)
     model.predict(dummy, imgsz=args.imgsz, device=device, verbose=False)
 
-    reader = LatestFrameReader(args.camera)
+    reader = LatestFrameReader(args.camera, args.focus)
     fps, prev_t = 0.0, time.perf_counter()
 
     try:
@@ -140,6 +157,7 @@ def main() -> None:
                 verbose=False,
             )[0]
 
+            raw = frame.copy()                      # keep an un-annotated copy for the [s] key
             n = draw_detections(frame, result, names)
 
             now = time.perf_counter()
@@ -157,8 +175,14 @@ def main() -> None:
                         2, cv2.LINE_AA)
 
             cv2.imshow(WINDOW_NAME, view)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
                 break
+            if key == ord("s"):                     # save raw frame (e.g. a speck the model missed)
+                SAVE_DIR.mkdir(exist_ok=True)
+                name = SAVE_DIR / (time.strftime("%Y%m%d_%H%M%S") + f"_{int(time.time() * 1000) % 1000:03d}.jpg")
+                cv2.imwrite(str(name), raw, [cv2.IMWRITE_JPEG_QUALITY, 98])
+                print(f"saved {name}")
     finally:
         reader.release()
         cv2.destroyAllWindows()
